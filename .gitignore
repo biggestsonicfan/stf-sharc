@@ -1,0 +1,8 @@
+*.obj
+*.exe
+*.doj
+*.cpp
+*.lst
+*.map
+*.bin
+sharc.ach
