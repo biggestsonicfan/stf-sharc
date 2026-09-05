@@ -149,18 +149,29 @@ here is the authoritative one**; the g21k form is a downgrade for that assembler
 
 ## Verification
 
-Both files are verified by assembling them and comparing the linked PM image
-byte-for-byte against the ROM dumps `cpres1_be.bin` and `cpres2_be.bin`
-(big-endian 48-bit PM word streams, as read off the board).
+The claim these two files make is not that they are equivalent code. It is that
+assembling and linking them reproduces the two blobs the program ROM uploads to
+the SHARC, **byte for byte** — and that is something a ROM settles by itself.
 
-Current status — **both EXACT MATCH**:
+Current status — **both reproduce the ROM exactly**:
 
 ```
-cpres1.exe  section 'seg_pmco': 0x741C (29724 bytes = 4954 x 48-bit words)
-    vs cpres1_be.bin: EXACT MATCH
-cpres2.exe  section 'seg_pmco': 0x490E (18702 bytes = 3117 x 48-bit words)
-    vs cpres2_be.bin: EXACT MATCH
+cpres1
+  image  4954 PM words at 0x20000, byte for byte the ROM's
+  found  once in the program ROM, at 0xb6318 — the offset cpres.mjs names
+
+cpres2
+  image  3117 PM words at 0x20000, byte for byte the ROM's
+  found  once in the program ROM, at 0xbd748 — the offset cpres.mjs names
+
+the disassembly assembles to the two blobs the ROM carries
 ```
+
+That output is [stf-tools](https://github.com/biggestsonicfan/stf-tools)'
+`test-cpres.mjs`, run against this checkout — see
+[Round-trip check](#round-trip-check-against-the-rom) below. It is the check
+worth running: it needs no extracted reference image, and it will not take
+either blob's ROM offset on trust.
 
 ### Toolchain
 
@@ -172,18 +183,12 @@ The GPL **g21k** toolchain — no license required. Everything comes from a
 | `asm21k.exe` | `app/` | macro preprocessor |
 | `a21000.exe` | `app/` | assembler → relocatable COFF `.obj` |
 | `ld21k.exe`  | `link/` | linker → `.exe` |
-| `cdump.exe`  | `cdump/` | COFF section dump |
 
-Also needed:
+Also needed: `gawk`, and `to_g21k.awk` — the VisualDSP → g21k dialect
+converter, from the [g21k tools](https://github.com/sergev/g21k).
 
-- `gawk`
-- `to_g21k.awk` — the VisualDSP → g21k dialect converter, from the
-  [g21k tools](https://github.com/sergev/g21k)
-- `extract_obj.py` — slices `seg_pmco` out of the linked `.exe` and diffs it
-  against the reference image
-
-> `extract_obj.py` has a `CDUMP` constant at the top pointing at `cdump.exe`.
-> Set it to whichever build you have; they work identically.
+Nothing else. `test-cpres.mjs` reads the COFF section table itself rather than
+shelling out to `cdump`, so the check needs only Node and a ROM set.
 
 The recipe below assumes `$G21K` is the `g21k/binutils` directory and `$AWK` is
 the path to `to_g21k.awk`.
@@ -213,33 +218,27 @@ Two fixes, either works:
   The ADI 21k tools distribution ships one; its `a21000` and `ld21k` are
   interchangeable with the g21k build's.
 
-`-l` makes no difference. Only the preprocessor is affected — `a21000`, `ld21k`
-and `cdump` are all fine.
+`-l` makes no difference. Only the preprocessor is affected — `a21000` and
+`ld21k` are both fine.
 
-### Build and verify
+### Build
 
-`sharc.ach` places the code segment at its real address, PM block 0, so the
-linker resolves every absolute jump/call/dm relocation to `0x20xxx`. Save this
-alongside the sources:
+`sharc.ach` is in this repo. It places the code segment at its real address, PM
+block 0, so the linker resolves every absolute jump/call/dm relocation to
+`0x20xxx` — and `test-cpres.mjs` reads the link address out of it rather than
+assuming `0x20000`, so it is part of the claim, not a convenience.
 
-```
-! Architecture description for the Sega Model 2 SHARC coprocessor (ADSP-21062).
-.SYSTEM model2_sharc;
-.PROCESSOR=ADSP21062;
-.SEGMENT/RAM/PM/BEGIN=0x20000/END=0x24fff   seg_pmco;
-.ENDSYS;
-```
-
-Then, per file (PowerShell):
+Per file (PowerShell):
 
 ```powershell
-$G   = '<path to g21k/binutils>'
-$AWK = '<path to to_g21k.awk>'
-$env:ADI_DSP = '<toolchain root>'    # asm21k/a21000 read this
+$G    = '<path to g21k/binutils>'
+$AWK  = '<path to to_g21k.awk>'
+$GAWK = 'gawk.exe'                    # or its full path, if not on PATH
+$env:ADI_DSP = '<toolchain root>'     # asm21k/a21000 read this
 
 foreach ($n in 'cpres1','cpres2') {
     # 1. VisualDSP dialect -> g21k dialect
-    & gawk.exe -f $AWK "$n.asm" | Set-Content -Encoding ascii "$n.g21k.asm"
+    & $GAWK -f $AWK "$n.asm" | Set-Content -Encoding ascii "$n.g21k.asm"
 
     # 2. preprocess
     & "$G\app\asm21k.exe" -pp -o "$n.raw.cpp" "$n.g21k.asm"
@@ -254,18 +253,65 @@ foreach ($n in 'cpres1','cpres2') {
     # 5. link -- resolves absolute addresses against the 0x20000 base
     & "$G\link\ld21k.exe" -a sharc.ach -o "$n.exe" "$n.obj"
 }
-
-# 6. extract seg_pmco and compare against the ROM dumps
-python extract_obj.py cpres1.exe cpres2.exe
 ```
 
-Step 5 is essential and easy to skip by accident. `a21000` emits a
-*relocatable* object — every absolute jump, call and `dm` address is
-segment-relative until `ld21k` adds the `0x20000` base. Comparing the `.obj`
-against the ROM will not match; only the linked `.exe` will.
+That leaves `cpres1.exe` and `cpres2.exe` in the checkout, which is what the
+check below reads. They are gitignored, along with every other intermediate.
 
-The intermediate `cpres1.g21k.asm` should hash to `299bc81a1ccb9753eed59c9fe7ae8e37`
-(MD5), which is a useful early checkpoint if the final compare fails.
+### Round-trip check against the ROM
+
+[stf-tools](https://github.com/biggestsonicfan/stf-tools) carries `test-cpres.mjs`,
+which holds a fresh assembly against the program ROM itself. Point it at this
+checkout with `--disasm` (or `$STF_DISASM`) and give it a ROM set:
+
+```
+node test-cpres.mjs --disasm <path to stf-sharc> sfight.zip
+```
+
+```
+disassembly  ...\stf-sharc
+sharc.ach    seg_pmco at PM 0x20000..0x24fff
+sfight.zip   program ROM 1048576 bytes
+
+cpres1
+  image  4954 PM words at 0x20000, byte for byte the ROM's
+  found  once in the program ROM, at 0xb6318 — the offset cpres.mjs names
+
+cpres2
+  image  3117 PM words at 0x20000, byte for byte the ROM's
+  found  once in the program ROM, at 0xbd748 — the offset cpres.mjs names
+
+the disassembly assembles to the two blobs the ROM carries
+```
+
+What it settles, in order: that the linker did what `sharc.ach` asked — one
+`seg_pmco`, at that address, inside that window, a whole number of 48-bit PM
+words; that there are as many of them as the ROM carries; that they are the same
+bytes once the word order is accounted for (a linker writes a PM word big end
+first, the ROM holds it low byte first); and finally that the assembled image
+turns up in the program ROM **exactly once**, at the offset `cpres.mjs` names.
+Neither blob's address is given to it, so a wrong offset and a wrong build
+cannot hide each other.
+
+It reads the linked `.exe`, never the `.obj` — `a21000` leaves every absolute
+jump, call and `dm` address segment-relative, so an unlinked image differs from
+the ROM in every address it carries. Step 5 above is part of the claim.
+
+Two notes specific to using it against *this* repo rather than `m2-hle/disassembly`:
+
+- **`--build` does not work here.** It runs the disassembly's own
+  `build_obj.bat`, which this repo does not carry; you get one failure saying so
+  while the images themselves still verify. Run the build above by hand first.
+- **The staleness warning will not fire.** `cpres.mjs` knows the sources by
+  their m2-hle names (`cpres1_ad_annotated_fixed.asm`, `cpres2_ad.asm`), so it
+  cannot notice that `cpres1.asm` here is newer than `cpres1.exe`. Rebuild
+  before checking; a stale `.exe` beside an edited listing agrees with nothing.
+
+The ROM set is yours to supply — neither repo carries one.
+
+If the check fails, the intermediate `cpres1.g21k.asm` should hash to
+`299bc81a1ccb9753eed59c9fe7ae8e37` (MD5) — a useful early checkpoint that
+separates a bad dialect conversion from a bad assembly.
 
 ### VisualDSP
 

@@ -1,0 +1,7 @@
+! Architecture description for the Sega Model 2 SHARC coprocessor (ADSP-21062).
+! Places the PM code segment 'seg_pmco' at its real address, PM block 0 (0x20000),
+! so the linker resolves all absolute jump/call/dm address relocations to 0x20xxx.
+.SYSTEM model2_sharc;
+.PROCESSOR=ADSP21062;
+.SEGMENT/RAM/PM/BEGIN=0x20000/END=0x24fff   seg_pmco;
+.ENDSYS;
