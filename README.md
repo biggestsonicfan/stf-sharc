@@ -61,6 +61,15 @@ Most commands read or transform that matrix: `Fn_push_matrix`, `Fn_base_matrix`
 (`Fn_parts_oidasi`, `Fn_calc_coli_flag`), shadows (`Fn_kage_*`), afterimages
 (`Fn_zanzou_*`) and display-list submission (`Fn_put_poly`).
 
+**One command is variable-length.** Every handler but one reads a fixed number
+of words and writes a fixed number back, which is what lets a host count a
+command's arguments from its opcode alone. `Fn_zanzou_reserve` (`0x80`) does
+not: it takes four header words, then one four-word record per trailing body
+part with a word answered after each, then `-1`, a turn angle and a last word
+answered — `4 + 4n + 2` in and `n + 1` out. An emulator that reads argument
+counts out of a table has to stream that one, or every word after it is
+mistaken for a command. The block at PM `0x20961` documents the exchange.
+
 ### cpres2 — the GEO (geometrizer)
 
 The render stage. It consumes the display list the COP produced, transforms and
@@ -144,6 +153,13 @@ VisualDSP: 0x434F50595200        g21k: 0x434F505952
 `0x434F50595200` is `"COPYR\0"` as a full 48-bit PM word; PM zero-pads the sixth
 byte back, so the linked image is identical either way. **The VisualDSP form
 here is the authoritative one**; the g21k form is a downgrade for that assembler.
+
+**No apostrophes, anywhere — including in comments.** `asm21k -pp` reads a bare
+`'` as the start of a quoted string and does not stop at the end of a `!`
+comment line, so one contraction in an annotation block ends the preprocessor
+with a screenful of `Unterminated quoted string`. Paired double quotes are
+fine, which is why the handler blocks write `"zanzou"` and "the matrix of the
+previous frame" rather than "the previous frame's matrix".
 
 ---
 

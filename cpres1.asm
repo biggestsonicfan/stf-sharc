@@ -371,14 +371,14 @@ _L20080:
     dm(i2,m1)=0x20487;  /* [0x7d] Fn_store_inner_3x3          opcode 0x3E807D7D  in=?  out=?   store the 3x3 to the inner bank */
     dm(i2,m1)=0x203fc;  /* [0x7e] Fn_mul_matrix_inner3        opcode 0x3F007E7E  in=2  out=0   3x3 from DM table 0x31000/0x31800 + index; current = M * current */
     dm(i2,m1)=0x20db3;  /* [0x7f] Fn_coli_copy_unit_matrix    opcode 0x3F807F7F  in=1  out=0   copy the unit matrix into the collision buffer */
-    dm(i2,m1)=0x20961;  /* [0x80] Fn_zanzou_reserve           opcode 0x40008080  in=?  out=?   reserve an afterimage ("zanzou") slot */
+    dm(i2,m1)=0x20961;  /* [0x80] Fn_zanzou_reserve           opcode 0x40008080  in=VARIABLE out=VARIABLE   lay a fighter afterimage trail; the only variable-length command in the table -- 4 + 4n + 2 in, n + 1 out, see PM 0x20961 */
     dm(i2,m1)=0x208e1;  /* [0x81] Fn_zanzou_init              opcode 0x40808181  in=0  out=0   afterimage ("zanzou") init */
-    dm(i2,m1)=0x20911;  /* [0x82] Fn_zanzou_inc               opcode 0x41008282  in=0  out=1   afterimage ("zanzou") counter increment -> int */
-    dm(i2,m1)=0x20937;  /* [0x83] Fn_zanzou_load_matrix_inner opcode 0x41808383  in=?  out=?   load an afterimage matrix from the inner bank */
+    dm(i2,m1)=0x20911;  /* [0x82] Fn_zanzou_inc               opcode 0x41008282  in=0  out=1   age every afterimage slot by its own step -> how many are still alive */
+    dm(i2,m1)=0x20937;  /* [0x83] Fn_zanzou_load_matrix_inner opcode 0x41808383  in=1  out=0   the stored matrix of slot n -> current matrix */
     dm(i2,m1)=0x20926;  /* [0x84] Fn_zanzou_mul_matrix_inner  opcode 0x42008484  in=1  out=0   multiply an afterimage matrix from the inner bank */
-    dm(i2,m1)=0x208e6;  /* [0x85] Fn_zanzou_get_info          opcode 0x42808585  in=1  out=0   read afterimage info */
+    dm(i2,m1)=0x208e6;  /* [0x85] Fn_zanzou_get_info          opcode 0x42808585  in=1  out=5   slot n: part, player|flag, life, step, age-picked object number */
     dm(i2,m1)=0x20955;  /* [0x86] Fn_zanzou_kill_timer_buffer opcode 0x43008686  in=1  out=0   kill the afterimage timer buffer */
-    dm(i2,m1)=0x20946;  /* [0x87] Fn_zanzou_get_matrix_inner  opcode 0x43808787  in=?  out=?   get an afterimage matrix from the inner bank */
+    dm(i2,m1)=0x20946;  /* [0x87] Fn_zanzou_get_matrix_inner  opcode 0x43808787  in=1  out=0   current matrix -> the stored matrix of slot n */
     lcntr=0x78, do (pc,0x1) until lce;
     dm(i2,m1)=0x2016f;
     i2=0x30000;
@@ -3210,9 +3210,49 @@ _L208D2:
 // ----------------------------------------------------------------------------
     rts;
 
+// ==============================================================================
+// THE AFTERIMAGE ("zanzou") ENGINE -- dispatch 0x80..0x87, PM 0x208E1..0x20A8E
+//
+// The COP owns the whole trail.  The i960 only says which body parts are
+// trailing and how far apart the copies should be; this code measures how far
+// each part moved since the previous frame, lays a run of interpolated copies
+// of its matrix into a 128-slot ring in DM, ages them, and hands them back one
+// at a time to be drawn.  The i960 side is zanzou_control (0x8AA48), which runs
+// once per fighter, and zanzou_disp (0x8ACD8), which walks all 128 slots.
+// A move turns the trail on through motion-script action 0x26, whose 13-byte
+// record carries the part mask, the life step, the turn angle and the spacing.
+//
+// DM map:
+//   0x32000 / 0x320C0   the 16 unit matrices of the previous frame, P0 / P1 --
+//                       the snapshot Fn_coli_copy_unit_matrix (0x7F) takes of
+//                       0x30420 / 0x304E0 at the top of the frame.  Nothing
+//                       else writes this bank, which is what makes 0x7F part
+//                       of this engine and not only of the collision chain.
+//   0x32180             ring write index (0..0x7F)
+//   0x32181             spacing in world units   (i960 zanzou_ma, 0.1)
+//   0x32182             life a fresh trail starts at (i960 sends 3 at boot)
+//   0x32184..0x3218F    12-word scratch: the matrix delta of this part
+//   0x32190 / 0x321F0   16 per-part age counters, P0 / P1
+//   0x321A0 / 0x32200   3 x 16 per-part object numbers, P0 / P1
+//   0x321E0 / 0x32240   the part mask of the previous frame, P0 / P1
+//   0x32300 + n*0x20    ring slot n, n < 0x80:
+//       [0]        part index 0..15
+//       [1]        player, | 0x80000000 while a turn is owed (PM 0x20A6D)
+//       [2]        life; dead at 0
+//       [3]        what is added to life each frame -- a negative i960 step
+//       [4][5][6]  three object numbers, picked by age in Fn_zanzou_get_info
+//       [0x14..]   12-word matrix, col0 col1 col2 T
+// ==============================================================================
+
 // ----------------------------------------------------------------------------
 // Fn_zanzou_init               [official source label]   dispatch 0x81  opcode 0x40808181
 //   in=0  out=0    PM 0x208E1   afterimage ("zanzou") init
+//
+// Zero DM[0x32180..0x375FF]: the ring index, the constants, the counters,
+// object tables and masks of both fighters, and all 128 slots.  It stops short
+// of 0x32000, so the unit matrices of the previous frame survive it.
+// cop_initialize_end2 sends this before send_zanzou_data, which is why the
+// constants at 0x32181 and 0x32182 are not wiped out from under the engine.
 // ----------------------------------------------------------------------------
     i6=0x32180;
     r0=0;
@@ -3222,7 +3262,19 @@ _L208D2:
 
 // ----------------------------------------------------------------------------
 // Fn_zanzou_get_info           [official source label]   dispatch 0x85  opcode 0x42808585
-//   in=1  out=0    PM 0x208E6   read afterimage info
+//   in=1  out=5    PM 0x208E6   read afterimage info
+//
+// One ring slot, five words out: slot[0] part, slot[1] player|flag, slot[2]
+// life, slot[3] step, and then ONE of slot[4..6] -- the three object numbers
+// the trail fades through -- picked by how much life the copy has left:
+//     t0 = 7*(|step|/4 - 1) + 40    t1 = 1.5*|step|
+//     life > t0 -> slot[4]      life > t1 -> slot[5]      else slot[6]
+// so a copy swaps model twice as it fades.  With the game step of -4 those
+// come out 40 and 6; 40 is the i960 zanzou_pat2 exactly.  (The r0=0x14 at
+// _L208FE is dead -- r0 is reloaded with 0x28 before it is used.)
+//
+// zanzou_disp reads all 128 slots every frame, skips any whose life has
+// reached 0, and draws the rest on alternating frames (frame_counter + slot).
 // ----------------------------------------------------------------------------
     if flag0_in jump (pc, 0);
     r0=dm(m0,i0);
@@ -3273,6 +3325,13 @@ _L2090E:
 // ----------------------------------------------------------------------------
 // Fn_zanzou_inc                [official source label]   dispatch 0x82  opcode 0x41008282
 //   in=0  out=1    PM 0x20911   afterimage ("zanzou") counter increment -> int
+//
+// Walk all 128 slots.  A slot whose life is already 0 is skipped; otherwise
+// life += slot[3] (the i960 step, negative), and the slot is counted.  A life
+// that crosses into negative is clamped to 0 and taken back off the count.
+// The answer is how many copies are still alive; the i960 keeps it in
+// zanzou_num.  The name says "increment" because the step is what is added --
+// it is the i960 that makes it a countdown.
 // ----------------------------------------------------------------------------
     r2=0;
     i6=0x32300;
@@ -3301,6 +3360,11 @@ _L20920:
 // ----------------------------------------------------------------------------
 // Fn_zanzou_mul_matrix_inner   [official source label]   dispatch 0x84  opcode 0x42008484
 //   in=1  out=0    PM 0x20926   multiply an afterimage matrix from the inner bank
+//
+// current = current * slot[n] through _L201EA, the same post-multiply 0x0B,
+// 0x37 and 0x45 use.  The "inner bank" here is the afterimage ring: the slot
+// matrix base is 0x32314, which is [0x14] of slot 0.  This is what zanzou_disp
+// opens each draw with, before one ang_x and set_obj.
 // ----------------------------------------------------------------------------
     if flag0_in jump (pc, 0);
     r6=dm(m0,i0);
@@ -3322,7 +3386,10 @@ _L20920:
 
 // ----------------------------------------------------------------------------
 // Fn_zanzou_load_matrix_inner  [official source label]   dispatch 0x83  opcode 0x41808383
-//   in=?  out=?    PM 0x20937   load an afterimage matrix from the inner bank
+//   in=1  out=0    PM 0x20937   load an afterimage matrix from the inner bank
+//
+// The 12 words of ring slot n straight into the current matrix, col0 col1
+// col2 T -- no transpose and no negation.  0x84 is the composing form.
 // ----------------------------------------------------------------------------
     if flag0_in jump (pc, 0);
     r6=dm(m0,i0);
@@ -3342,7 +3409,11 @@ _L20920:
 
 // ----------------------------------------------------------------------------
 // Fn_zanzou_get_matrix_inner   [official source label]   dispatch 0x87  opcode 0x43808787
-//   in=?  out=?    PM 0x20946   get an afterimage matrix from the inner bank
+//   in=1  out=0    PM 0x20946   get an afterimage matrix from the inner bank
+//
+// The mirror of 0x83: the 12 words of the current matrix into ring slot n.
+// "get" is from the point of view of the ring, and nothing comes back over
+// the FIFO.
 // ----------------------------------------------------------------------------
     if flag0_in jump (pc, 0);
     r6=dm(m0,i0);
@@ -3363,6 +3434,12 @@ _L20920:
 // ----------------------------------------------------------------------------
 // Fn_zanzou_kill_timer_buffer  [official source label]   dispatch 0x86  opcode 0x43008686
 //   in=1  out=0    PM 0x20955   kill the afterimage timer buffer
+//
+// Zero the 16 per-part age counters of one fighter (0x32190, or 0x321F0 when
+// the argument is 1).  The i960 sends it for a fighter whose part mask has
+// gone to zero, so the next trail that fighter starts begins at a fresh life
+// rather than carrying on from the last one.  The copies already in the ring
+// are untouched -- they go on fading on their own.
 // ----------------------------------------------------------------------------
     i6=0x32190;
     if flag0_in jump (pc, 0);
@@ -3378,10 +3455,60 @@ _L2095B:
     dm(0x20,i3)=r15;
     rts;
 
-// ----------------------------------------------------------------------------
+// ==============================================================================
 // Fn_zanzou_reserve            [official source label]   dispatch 0x80  opcode 0x40008080
-//   in=?  out=?    PM 0x20961   reserve an afterimage ("zanzou") slot
-// ----------------------------------------------------------------------------
+//   in=VARIABLE  out=VARIABLE    PM 0x20961   lay the afterimage trail of one
+//                                             fighter
+//
+// THE ONLY VARIABLE-LENGTH COMMAND IN THE TABLE.  Every other handler reads a
+// fixed number of words and writes a fixed number back, which is what lets a
+// host count arguments from the opcode alone.  This one does not: it reads
+// until the i960 sends a terminator, and answers as it goes.  The exchange,
+// against zanzou_control at i960 0x8AB10:
+//
+//   in   player                     (0 or 1; picks every bank below)
+//   in   part mask                  16 bits, one per body part
+//   in   life step                  rob+0xC62, negative; what 0x82 will add
+//   in   bone length                the per-part length out of rob, a float
+//        ---- then, for each part the i960 scanbit finds in the mask: ----
+//   in   part index 0..15
+//   in   object number, stage 0     the three models the trail fades through
+//   in   object number, stage 1
+//   in   object number, stage 2
+//   out  index + 0x20               (the i960 reads it into a dead register)
+//        ---- then: ----
+//   in   -1                         end of the record list
+//   in   turn angle                 rob+0xA1E, i16; 0 = no turn
+//   out  one word                   see step 4 and step 6 below
+//
+// So 4 + 4n + 2 words in and n + 1 out, n = the number of parts set in the
+// mask.  A host that counts arguments from a table has to stream this one.
+//
+// Step by step:
+//   1. The four header words.  The player picks the current-matrix bank
+//      (0x30420 / 0x304E0), the bank of the previous frame (0x32000 /
+//      0x320C0), the object table (0x321A0 / 0x32200), the age counters
+//      (0x32190 / 0x321F0) and the saved mask (0x321E0 / 0x32240).
+//   2. Any part whose bit changed since the previous frame has its age
+//      zeroed, then the new mask is saved.  A part that has just started or
+//      just stopped trailing therefore begins again at a fresh life.
+//   3. The record list fills the object table, three entries a part.
+//   4. On the terminator, _L209AE measures how far each active part moved
+//      since the previous frame -- both its joint (slot[9..11]) and a point
+//      one bone length out along its own +X -- and keeps the largest squared
+//      distance.  More than 13.0 is a teleport rather than a swing: no trail
+//      is laid and the answer is that threshold itself, 0x41500000.
+//      Otherwise the spacing is  DM[0x32181] / sqrt(that distance)  -- one
+//      copy per 0.1 world units of travel -- forced to 1.0 if it comes out
+//      exactly 0 and floored at 0.01, which caps a part at 100 copies.
+//   5. _L20A17 lays the run of each active part; a part NOT in the mask has
+//      its age zeroed instead.
+//   6. _L20A6D turns every slot that owes a turn, and the answer is the
+//      cosine of the turn angle, left in r0 by _L202C1.
+//
+// Both fighters write the same 128-slot ring, so the second call of a frame
+// carries on from where the first stopped.
+// ==============================================================================
     if flag0_in jump (pc, 0);
     r15=dm(m0,i0);
     dm(0x12,i3)=r15;
@@ -3671,9 +3798,39 @@ _L20A68:
     rts;
 
 // ==============================================================================
-// _L20A6D  PARTICLE_TICK_ALL  (PM 0x20A6D)
-// Tick all 128 particle slots in DM[0x32300..]. For each live slot apply
-// one ang_y rotation by the stored angle and decrement the lifetime counter.
+// _L20A17  AFTERIMAGE_LAY_RUN  (PM 0x20A17)   the run of copies of one part
+//
+// Entry: r14 = part index, f11 = the spacing chosen in _L209F0, and the header
+// words still in the i3 scratch frame.  Nothing comes back.
+//
+// The three object numbers of the part are read out of the object table, and
+// the 12-word difference between the matrix of this frame and the matrix of
+// the previous one is built in the scratch at 0x32184.  The age counter
+// decides the life of the first copy: one less than the previous frame, or
+// DM[0x32182] if the part was not trailing.
+//
+// Then t walks 0 towards 1.0 in steps of f11, and at every stop one ring slot
+// is filled -- part, player (| 0x80000000 if a turn is owed), life, step, the
+// three object numbers, and the matrix interpolated  previous + delta*t.
+// Life rises by one per copy, so the copy nearest the pose of this frame
+// outlives the ones behind it, which is what makes the trail fade from its
+// tail.  The ring index wraps at 0x80 and the final life is written back to
+// the counter.
+//
+// The guard before the step is  0 >= f11 -> stop: a spacing that came out
+// zero or negative still lays exactly one copy rather than looping forever.
+// ==============================================================================
+
+// ==============================================================================
+// _L20A6D  AFTERIMAGE_TURN_ALL  (PM 0x20A6D)
+// Walk all 128 ring slots.  A slot whose [1] has bit 31 set owes a turn: the
+// bit is cleared (only the player bit is kept) and its stored matrix is turned
+// once by the angle the command carried, through the sin/cos of _L202C1.  It
+// is the ang_x form -- col1 and col2, as _L201AA does it:
+//     col1new = c*col1 - s*col2        col2new = s*col1 + c*col2
+// Nothing here touches the life counter; that is the job of Fn_zanzou_inc.
+// The flag is cleared as it goes, so a copy turns once however many reserves
+// walk the ring afterwards.
 // ==============================================================================
 _L20A6D:
     r0=dm(0x16,i3);
