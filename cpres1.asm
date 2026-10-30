@@ -59,6 +59,11 @@
 //              PM[0x21F18]: dummy sync write (1-cycle pipeline stall)
 // ==============================================================================
 
+#ifdef FV_COP
+#define FV_MODE 0x37F00
+#define FV_GRID 0x37F01
+#endif
+
 .SECTION/PM seg_pmcode;
 
 // ==============================================================================
@@ -379,8 +384,13 @@ _L20080:
     dm(i2,m1)=0x208e6;  /* [0x85] Fn_zanzou_get_info          opcode 0x42808585  in=1  out=5   slot n: part, player|flag, life, step, age-picked object number */
     dm(i2,m1)=0x20955;  /* [0x86] Fn_zanzou_kill_timer_buffer opcode 0x43008686  in=1  out=0   kill the afterimage timer buffer */
     dm(i2,m1)=0x20946;  /* [0x87] Fn_zanzou_get_matrix_inner  opcode 0x43808787  in=1  out=0   current matrix -> the stored matrix of slot n */
+#ifdef FV_COP
+    call _Lfv_init;                         // [0x88] Fn_fv_mode, then 0x89..0xFF -> _L2016F
+    nop;
+#else
     lcntr=0x78, do (pc,0x1) until lce;
     dm(i2,m1)=0x2016f;
+#endif
     i2=0x30000;
     i3=0x30300;
     i6=0x30300;
@@ -4949,7 +4959,11 @@ _L20E13:
 _L20E28:
     f0=f0-f8;
     f1=f1+f8;
+#ifdef FV_COP
+    r15=dm(FV_GRID);                        // 8.0, or the grid Fn_fv_mode set
+#else
     r15=0x41000000;
+#endif
     r14=0x42000000;
     r13=0x3f000000;
     f8=f0*f15;
@@ -5055,7 +5069,11 @@ _L20E7C:
 _L20E8F:
     f0=f0-f8;
     f1=f1+f8;
+#ifdef FV_COP
+    r15=dm(FV_GRID);                        // 8.0, or the grid Fn_fv_mode set
+#else
     r15=0x41000000;
+#endif
     r14=0x42000000;
     r13=0x3f000000;
     r12=0x42800000;
@@ -5915,9 +5933,15 @@ _L2117C:
     f4=abs f3;
     f0=abs f7;
     r3=dm(0x4,i3);
+#ifdef FV_COP
+    call _Lfv_sm_ang;                       // the StF form, or the FV form in FV mode
+    nop;
+    nop;
+#else
     f13=f3+f10;
     r0=0xbf800000;
     f13=f13*f0;
+#endif
     f8=f10-f3;
     comp(f15,f3);
     if gt r8=r13;
@@ -6408,3 +6432,117 @@ _L21342:
     if flag1_in jump (pc, 0);
     dm(m0,i1)=r0;
     rts;
+
+#ifdef FV_COP
+// ==============================================================================
+// FV_COP  --  Fighting Vipers behaviour on the Sonic the Fighters COP
+//
+// Built only with -DFV_COP; without it this file assembles to the ROM image.
+// FV (Model 2B, the same ADSP-21062) runs its own revision of this program.
+// Taken from its disassembly, it differs from this one in three places that
+// change a result rather than an argument list or a scratch address:
+//
+//   1. the atan/asin and sin/cos polynomial constants at DM 0x30284..0x3029B.
+//      FV does not write them in its init: its i960 uploads them, and every
+//      one of them is the correctly rounded value, where _L20162 and _L20154
+//      write most of them one ulp low (0x357fffff for 0x35800000, ...).
+//   2. Fn_area_table_gen (0x3A): the broad-phase grid is 16.0 a cell in FV,
+//      8.0 here (r15 at PM 0x20E2A and 0x20E91).
+//   3. Fn_get_sm_ang_r (0x55): for the second angle FV adds pi to f13 as it
+//      stands, where this revision loads -(angle + pi), and leaves f0 alone,
+//      where this one overwrites it with -1.0 before it is summed.
+//
+// The rest of the two programs differs only in how arguments are taken
+// (0x38, 0x70, 0x71: this revision keeps the player in DM 0x307F2) and in
+// the addresses of the ball-mask tables; 0x33 Fn_coli_dist and 0x3C
+// Fn_coli_sink are bare rts in both.
+//
+// One command switches between the two behaviours, so a host can run FV
+// fighters and StF fighters on one image:
+//
+//   Fn_fv_mode   dispatch 0x88  opcode 0x44008888  in=2  out=0
+//     word 0  0 = this revision (the default after init), else FV
+//     word 1  the broad-phase cell size as a float; 0 = 8.0.  A host that
+//             keeps FV fighters at another scale passes 16.0 in its units.
+//
+// FV_MODE and FV_GRID are two DM words at the top of block 1, which nothing
+// else in the program touches.
+// ==============================================================================
+
+// -- init: entry 0x88, the error halt for 0x89..0xFF, StF mode, 8.0 grid --
+_Lfv_init:
+    dm(i2,m1)=_Fn_fv_mode;
+    lcntr=0x77, do (pc,0x1) until lce;
+    dm(i2,m1)=0x2016f;
+    r0=0;
+    dm(FV_MODE)=r0;
+    r0=0x41000000;
+    rts (db);
+    dm(FV_GRID)=r0;
+    nop;
+
+// ----------------------------------------------------------------------------
+// Fn_fv_mode                   [not in the Sega library]   dispatch 0x88  opcode 0x44008888
+//   in=2  out=0    mode (0 = StF, else FV), broad-phase cell (float, 0 = 8.0)
+// ----------------------------------------------------------------------------
+_Fn_fv_mode:
+    if flag0_in jump (pc, 0);
+    r0=dm(m0,i0);
+    if flag0_in jump (pc, 0);
+    r1=dm(m0,i0);
+    dm(FV_MODE)=r0;
+    r2=0x41000000;
+    r1=pass r1;
+    if eq r1=r2;
+    dm(FV_GRID)=r1;
+    dm(0x20,i3)=r15;
+    dm(0x20,i3)=r15;
+    r0=pass r0;
+    if ne jump _Lfv_const;
+    call _L20162;
+    jump _L20154;
+
+// -- the constants FV uploads, correctly rounded --
+_Lfv_const:
+    i6=0x30284;
+    dm(i6,m1)=0x3ea2f983;
+    dm(i6,m1)=0x40491000;
+    dm(i6,m1)=0xb715777a;
+    dm(i6,m1)=0x35800000;
+    dm(i6,m1)=0xab4f7739;
+    dm(i6,m1)=0x2f3072ab;
+    dm(i6,m1)=0xb2d731a6;
+    dm(i6,m1)=0x3638ef1c;
+    dm(i6,m1)=0xb9500d01;
+    dm(i6,m1)=0x3c088889;
+    dm(i6,m1)=0xbe2aaaab;
+    i6=0x30290;
+    dm(i6,m1)=0x3e8930a3;
+    dm(i6,m1)=0x3fddb3d7;
+    dm(i6,m1)=0x39800000;
+    dm(i6,m1)=0xbf3853ae;
+    dm(i6,m1)=0xbfb854a8;
+    dm(i6,m1)=0x4098123c;
+    dm(i6,m1)=0x408a3f7e;
+    dm(i6,m1)=0;
+    dm(i6,m1)=0x3f060a92;
+    dm(i6,m1)=0x3fc90fdb;
+    rts (db);
+    dm(i6,m1)=0x3f860a92;
+    dm(i6,m1)=0x40490fdb;
+
+// -- Fn_get_sm_ang_r, the second angle.  In: f3 = angle, f10 = pi.
+//    r14 is free here: the handler sets it before it next reads it. --
+_Lfv_sm_ang:
+    r14=dm(FV_MODE);
+    r14=pass r14;
+    if ne jump _Lfv_sm_ang_fv;
+    f13=f3+f10;
+    rts (db);
+    r0=0xbf800000;
+    f13=f13*f0;
+_Lfv_sm_ang_fv:
+    rts (db);
+    f13=f13+f10;
+    nop;
+#endif

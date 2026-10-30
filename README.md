@@ -161,6 +161,55 @@ with a screenful of `Unterminated quoted string`. Paired double quotes are
 fine, which is why the handler blocks write `"zanzou"` and "the matrix of the
 previous frame" rather than "the previous frame's matrix".
 
+### FV_COP: Fighting Vipers behaviour, on request
+
+Fighting Vipers is Model 2B too, and runs its own revision of cpres1 on the
+same ADSP-21062. Disassembled side by side (with the `asm21k` SHARC
+disassembler), the two programs differ in result in three places only:
+
+| | Sonic the Fighters (this file) | Fighting Vipers |
+|---|---|---|
+| atan/asin and sin/cos constants, DM `0x30284`–`0x3029B` | written by `_L20162`/`_L20154` at init, most of them one ulp low | uploaded by the i960, correctly rounded |
+| `Fn_area_table_gen` (`0x3A`), broad-phase cell | 8.0 (`r15` at PM `0x20E2A`, `0x20E91`) | 16.0 |
+| `Fn_get_sm_ang_r` (`0x55`), second angle | `f13` = -(angle + pi), and `f0` overwritten with -1.0 | `f13` + pi, `f0` left alone |
+
+Everything else is arguments and scratch: `0x38`, `0x70` and `0x71` take the
+player differently (this revision keeps it in DM `0x307F2`), the ball-mask
+tables sit at other addresses, and `0x33 Fn_coli_dist` and `0x3C Fn_coli_sink`
+are bare `rts` in both.
+
+Assembled with `-DFV_COP`, cpres1 gets one more command, so a host can run FV
+fighters and StF fighters on one image:
+
+```
+Fn_fv_mode   dispatch 0x88  opcode 0x44008888  in=2  out=0
+  word 0   0 = StF behaviour (the default after init), else FV
+  word 1   the broad-phase cell as a float; 0 = 8.0
+```
+
+FV mode writes FV's constants, makes the two grid loads read the cell it was
+given, and switches the second angle of `0x55` to FV's form. The mode and
+the cell are two DM words at `0x37F00`, the top of block 1, which nothing else
+in the program touches. The changes in place are all the same size as what
+they replace, so the dispatch table and every address up to PM `0x21359`
+stay put; the new code is appended after it (PM `0x2135A`–`0x21395`, 5014
+words in all).
+
+Without `-DFV_COP` nothing changes: the file still assembles to the ROM's
+image, byte for byte (see [Verification](#verification)). Build it with the
+define on the preprocess step:
+
+```
+asm21k -pp -DFV_COP -o cpres1.raw.cpp cpres1.g21k.asm
+```
+
+Tested on MAME's Model 2B (`sfight`, the SHARC recompiler on): the FV_COP
+image, loaded over StF's at boot and set to FV mode with FV's cell in the
+host's units (16 / 2.044), plays the m2-megamix board's Mahler-vs-Mahler
+replay of Fighting Vipers to the same trace, byte for byte, as StF's
+behaviour does. On that replay none of the three differences changes a
+result, so FV_COP is for fidelity, not a fix for that replay's round 2.
+
 ---
 
 ## Verification
